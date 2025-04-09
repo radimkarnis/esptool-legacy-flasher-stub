@@ -55,7 +55,7 @@ SRCS = stub_flasher.c slip.c stub_commands.c stub_write_flash.c stub_io.c
 SRCS_8266 = miniz.c
 
 BUILD_DIR = build
-ESPTOOL_STUBS_DIR = ..
+ESPTOOL_STUBS_DIR = $(ESPTOOL_PATH)/esptool/targets/stub_flasher/1
 
 STUB_ELF_8266 = $(BUILD_DIR)/$(STUB)8266.elf
 STUB_ELF_32 = $(BUILD_DIR)/$(STUB)32.elf
@@ -82,25 +82,12 @@ endif
 
 ifneq ($(WITHOUT_ESP32_XTENSA),1)
 STUBS_ELF += \
-  $(STUB_ELF_32) \
-  $(STUB_ELF_32S2) \
-  $(STUB_ELF_32S3_BETA_2) \
   $(STUB_ELF_32S3)
 endif
 
 ifneq ($(WITHOUT_ESP32_RISCV32),1)
 STUBS_ELF += \
-  $(STUB_ELF_32C3) \
-  $(STUB_ELF_32C6BETA) \
-  $(STUB_ELF_32H2_BETA_1) \
-  $(STUB_ELF_32H2_BETA_2) \
-  $(STUB_ELF_32C2) \
-  $(STUB_ELF_32C6) \
-  $(STUB_ELF_32C61) \
-  $(STUB_ELF_32C5) \
-  $(STUB_ELF_32C5_BETA_3) \
-  $(STUB_ELF_32H2) \
-  $(STUB_ELF_32P4)
+
 endif
 
 .PHONY: all clean install

@@ -103,6 +103,12 @@ SpiFlashOpResult esp_rom_spiflash_write_encrypted(uint32_t addr, const uint8_t *
 void SPI_Write_Encrypt_Enable();
 void SPI_Write_Encrypt_Disable();
 SpiFlashOpResult SPI_Encrypt_Write(uint32_t flash_addr, const void* data, uint32_t len);
+SpiFlashOpResult SPI_Encrypt_Write2(uint32_t flash_addr, const void* data, uint32_t len);
+void esp_rom_spiflash_write_encrypted_enable();
+void esp_rom_spiflash_write_encrypted_disable();
+SpiFlashOpResult esp_rom_spiflash_unlock();
+SpiFlashOpResult esp_rom_spiflash_wait_idle(void);
+
 #endif
 
 #if ESP32S2_OR_LATER
@@ -354,3 +360,5 @@ esp_rom_spiflash_result_t esp_rom_opiflash_erase_sector(uint32_t sector_num);
 esp_rom_spiflash_result_t esp_rom_opiflash_erase_block_64k(uint32_t block_num);
 SpiFlashOpResult SPI_write_enable(esp_rom_spiflash_chip_t *spi);
 #endif // ESP32S3
+
+int ets_printf(const char *fmt, ...);

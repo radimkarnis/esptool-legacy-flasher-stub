@@ -24,6 +24,7 @@
 #define REG_SET_MASK(reg, mask) WRITE_REG((reg), (READ_REG(reg)|(mask)))
 #define REG_CLR_MASK(reg, mask) WRITE_REG((reg), (READ_REG(reg)&(~(mask))))
 #define REG_SET_FIELD(_r, _f, _v) (WRITE_REG((_r),((READ_REG(_r) & ~((_f) << (_f##_S)))|(((_v) & (_f))<<(_f##_S)))))
+#define REG_GET_FIELD(_r, _f) ((READ_REG(_r) >> (_f##_S)) & (_f##_V))
 
 #define ESP32_OR_LATER   !(ESP8266)
 #define ESP32S2_OR_LATER !(ESP8266 || ESP32)

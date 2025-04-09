@@ -360,6 +360,265 @@ void handle_flash_data(void *data_buf, uint32_t length) {
   fs.remaining -= length;
 }
 
+
+# define MAX_ENCRYPT_BLOCK 64
+
+#define DR_REG_AES_XTS_BASE                     0x600CC000
+#define AES_XTS_PLAIN_BASE        ((DR_REG_AES_XTS_BASE) + 0x00)
+#define AES_XTS_SIZE_REG          ((DR_REG_AES_XTS_BASE) + 0x40)
+#define AES_XTS_DESTINATION_REG   ((DR_REG_AES_XTS_BASE) + 0x44)
+#define AES_XTS_PHYSICAL_ADDR_REG ((DR_REG_AES_XTS_BASE) + 0x48)
+
+#define AES_XTS_TRIGGER_REG       ((DR_REG_AES_XTS_BASE) + 0x4C)
+#define AES_XTS_RELEASE_REG       ((DR_REG_AES_XTS_BASE) + 0x50)
+#define AES_XTS_DESTROY_REG       ((DR_REG_AES_XTS_BASE) + 0x54)
+#define AES_XTS_STATE_REG         ((DR_REG_AES_XTS_BASE) + 0x58)
+
+#define DR_REG_SPI0_BASE                        0x60003000
+#define REG_SPI_MEM_BASE(i)     (DR_REG_SPI0_BASE - (i) * 0x1000)
+#define SPI_MEM_CMD_REG(i)          (REG_SPI_MEM_BASE(i) + 0x0)
+#define PERIPHS_SPI_FLASH_CMD              SPI_MEM_CMD_REG(1)
+#define SPI_MEM_FLASH_PP    (BIT(25))
+
+
+
+SpiFlashOpResult SPI_Encrypt_Write2(uint32_t flash_addr, const void* data, uint32_t len)
+{
+    const uint8_t *data_bytes = (const uint8_t *)data;
+    SpiFlashOpResult result = SPI_FLASH_RESULT_OK;
+
+    if (flash_addr % 16 != 0 || len % 16 != 0) {
+        // Minimum 128-bit size & alignment
+        return SPI_FLASH_RESULT_ERR;
+    }
+
+    esp_rom_spiflash_write_encrypted_enable();
+
+
+    WRITE_REG(AES_XTS_DESTINATION_REG, 0);  // dest
+
+    result = esp_rom_spiflash_unlock();
+    if (result != SPI_FLASH_RESULT_OK) {
+        goto done;
+    }
+
+    while (len > 0) {
+        int next_block;
+        int timeout = 0;
+        const int TIMEOUT_LIMIT = 100000;
+        int page_size = 256;
+
+        /* Write the largest block possible */
+        // int page_size = rom_spiflash_legacy_data->chip.page_size;
+
+        if (flash_addr % 64 == 0 && len >= 64 && (page_size - flash_addr % page_size >= 64)) {
+            next_block = 64;
+        } else if (flash_addr % 32 == 0 && len >= 32 && (page_size - flash_addr % page_size >= 32)) {
+            next_block = 32;
+        } else {
+            next_block = 16;
+        }
+
+
+        WRITE_REG(AES_XTS_SIZE_REG, next_block >> 5); // 0, 1, 2
+
+        uint32_t plaintext_offs = (flash_addr % MAX_ENCRYPT_BLOCK);
+        memcpy((void *)(AES_XTS_PLAIN_BASE + plaintext_offs), data_bytes, next_block);
+
+        WRITE_REG(AES_XTS_PHYSICAL_ADDR_REG, 0xffffffff);
+
+        /*
+        ets_printf("Writing to 0x%x this block 0x%x bytes total length 0x%x\n", flash_addr, next_block, len);
+        REG_PRINT(SYSTEM_EXTERNAL_DEVICE_ENCRYPT_DECRYPT_CONTROL_REG);
+        REG_PRINT(AES_XTS_DESTINATION_REG);
+        REG_PRINT(AES_XTS_SIZE_REG);
+        REG_PRINT(AES_XTS_PHYSICAL_ADDR_REG);
+        */
+
+        // Perform the encryption
+        WRITE_REG(AES_XTS_TRIGGER_REG, 1);
+
+        // // Prepare the flash chip (same time as AES operation, for performance)
+        // result = SPI_write_enable(&rom_spiflash_legacy_data->chip);
+        // if (result != SPI_FLASH_RESULT_OK) {
+        //     goto done;
+        // }
+        spi_write_enable();
+
+        // Wait for encryption to finish
+        while(READ_REG(AES_XTS_STATE_REG) != 0x2 && timeout < TIMEOUT_LIMIT) {
+            timeout++;
+        }
+        if (timeout == TIMEOUT_LIMIT) {
+            result = SPI_FLASH_RESULT_TIMEOUT;
+            goto done;
+        }
+
+        esp_rom_spiflash_wait_idle();
+
+        // Make result visible for SPI
+        // WRITE_REG(AES_XTS_RELEASE_REG, 1);
+
+        // This actually seems to happen immediately
+        // while(READ_REG(AES_XTS_STATE_REG) != 0x3 && timeout < TIMEOUT_LIMIT) {
+        //     timeout++;
+        // }
+        // if (timeout == TIMEOUT_LIMIT) {
+        //     result = SPI_FLASH_RESULT_TIMEOUT;
+        //     goto done;
+        // }
+
+        result = esp_rom_spiflash_wait_idle();
+        if (result != SPI_FLASH_RESULT_OK) {
+            goto done;
+        }
+
+        // add sending command in user mode since FLASH_PP only send flash PP command(0x02)
+        // which is not acceptable by psram and octal flash.
+        // Note: also set SPI_MEM_FLASH_PE for HW auto suspend.
+        // usage: configure spi1 cmd, dummy and mode first, then call encrypt write function.
+        // WRITE_REG(PERIPHS_SPI_FLASH_CMD, SPI_MEM_FLASH_PP);  // SPI_MEM_FLASH_PP - spi_usr_mode
+        // while ( READ_REG(PERIPHS_SPI_FLASH_CMD) != 0 ) {
+        //     // if (rom_spiflash_legacy_funcs->check_sus) {
+        //     //     rom_spiflash_legacy_funcs->check_sus();
+        //     // }
+        // }
+
+        #define REG_SPI_MEM_BASE(i)     (DR_REG_SPI0_BASE - (i) * 0x1000)
+        #define SPI_MEM_CMD_REG(i)          (REG_SPI_MEM_BASE(i) + 0x0)
+        #define SPI_MEM_USER1_REG(i)          (REG_SPI_MEM_BASE(i) + 0x1C)
+        #define SPI_MEM_USER2_REG(i)          (REG_SPI_MEM_BASE(i) + 0x20)
+
+
+        #define SPI_MEM_ADDR_REG(i)          (REG_SPI_MEM_BASE(i) + 0x4)
+        #define SPI_MEM_USER_REG(i)          (REG_SPI_MEM_BASE(i) + 0x18)
+        #define SPI_MEM_MOSI_DLEN_REG(i)          (REG_SPI_MEM_BASE(i) + 0x24)
+
+        #define SPI_MEM_USR_MOSI_DBITLEN    0x000003FF
+        #define SPI_MEM_USR_MOSI_DBITLEN_M  ((SPI_MEM_USR_MOSI_DBITLEN_V)<<(SPI_MEM_USR_MOSI_DBITLEN_S))
+        #define SPI_MEM_USR_MOSI_DBITLEN_V  0x3FF
+        #define SPI_MEM_USR_MOSI_DBITLEN_S  0
+
+        #define SPI_USR_COMMAND_BITLEN_S  28
+        #define SPI_USR_ADDR_BITLEN    0x0000001F
+        #define SPI_USR_ADDR_BITLEN_M  ((SPI_USR_ADDR_BITLEN_V)<<(SPI_USR_ADDR_BITLEN_S))
+        #define SPI_USR_ADDR_BITLEN_V  0x1F
+        #define SPI_USR_ADDR_BITLEN_S  27
+
+        #define SPI_USR_COMMAND    (BIT(31))
+        #define SPI_USR_ADDR    (BIT(30))
+        #define SPI_USR_MOSI    (BIT(27))
+        #define SPI_USR_DUMMY    (BIT(29))
+        #define SPI_USR_MISO    (BIT(28))
+
+        #define SPI_MEM_USR  (BIT(18))
+        #define SPI_MEM_USR_M  (BIT(18))
+        #define SPI_MEM_USR_V  0x1
+        #define SPI_MEM_USR_S  18
+
+        #define SPI_MEM_USR_COMMAND_VALUE    0x0000FFFF
+        #define SPI_MEM_USR_COMMAND_VALUE_M  ((SPI_MEM_USR_COMMAND_VALUE_V)<<(SPI_MEM_USR_COMMAND_VALUE_S))
+        #define SPI_MEM_USR_COMMAND_VALUE_V  0xFFFF
+        #define SPI_MEM_USR_COMMAND_VALUE_S  0
+
+        #define SPI_MEM_USR_COMMAND_BITLEN    0x0000000F
+        #define SPI_MEM_USR_COMMAND_BITLEN_M  ((SPI_MEM_USR_COMMAND_BITLEN_V)<<(SPI_MEM_USR_COMMAND_BITLEN_S))
+        #define SPI_MEM_USR_COMMAND_BITLEN_V  0xF
+        #define SPI_MEM_USR_COMMAND_BITLEN_S  28
+
+        #define SPI_MEM_USR_DUMMY_CYCLELEN    0x0000003F
+        #define SPI_MEM_USR_DUMMY_CYCLELEN_M  ((SPI_MEM_USR_DUMMY_CYCLELEN_V)<<(SPI_MEM_USR_DUMMY_CYCLELEN_S))
+        #define SPI_MEM_USR_DUMMY_CYCLELEN_V  0x3F
+        #define SPI_MEM_USR_DUMMY_CYCLELEN_S  0
+
+        #define SPI_MEM_CMD_REG(i)          (REG_SPI_MEM_BASE(i) + 0x0)
+
+        #define DR_REG_GPIO_BASE                        0x60004000
+        #define GPIO_ENABLE_W1TS_REG        (DR_REG_GPIO_BASE + 0x24)
+
+        #define GPIO_OUT_W1TS_REG          (DR_REG_GPIO_BASE + 0x8)
+        #define GPIO_OUT_W1TC_REG          (DR_REG_GPIO_BASE + 0xC)
+
+        #define PERIPHS_IO_MUX_2           (DR_REG_IO_MUX_BASE + 0xc)
+
+
+        PIN_FUNC_SELECT(PERIPHS_IO_MUX_2, FUNC_GPIO);
+        WRITE_REG(GPIO_ENABLE_W1TS_REG, 1<<2);
+        WRITE_REG(GPIO_OUT_W1TS_REG, 1<<2);
+
+        #define SPI_MEM_CACHE_FCTRL_REG(i)          (REG_SPI_MEM_BASE(i) + 0x3C)
+        #define SPI_MEM_CACHE_USR_CMD_4BYTE    (BIT(1))
+        #define SPI_MEM_CACHE_USR_CMD_4BYTE_M  (BIT(1))
+        #define SPI_MEM_CACHE_USR_CMD_4BYTE_V  0x1
+        #define SPI_MEM_CACHE_USR_CMD_4BYTE_S  1
+
+        #define SPI_MEM_CTRL_REG(i)          (REG_SPI_MEM_BASE(i) + 0x8)
+        #define SPI_MEM_FASTRD_MODE    (BIT(13))
+
+        #define REG_SET_BIT(_r, _b)  do {                                                                                      \
+          *(volatile uint32_t*)(_r) = (*(volatile uint32_t*)(_r)) | (_b);                                            \
+      } while(0)
+      //clear bit or clear bits of register
+      #define REG_CLR_BIT(_r, _b)  do {                                                                                      \
+        *(volatile uint32_t*)(_r) = (*(volatile uint32_t*)(_r)) & (~(_b));                                         \
+      } while(0)
+
+      #define SPI_MEM_W0_REG(i)          (REG_SPI_MEM_BASE(i) + 0x058)
+
+        WRITE_REG(SPI_MEM_W0_REG(1), 0x5678abcd); // Dummy data, will use data from XTS-AES afterwards
+        REG_SET_BIT(SPI_MEM_USER_REG(1), SPI_USR_COMMAND);
+        REG_SET_FIELD(SPI_MEM_USER2_REG(1), SPI_MEM_USR_COMMAND_VALUE, 0x12);  // page program cmd
+        REG_SET_FIELD(SPI_MEM_USER2_REG(1), SPI_MEM_USR_COMMAND_BITLEN, (8-1)); // 8-bit command
+
+
+        // Set address bit length to 32 bits (4 bytes)
+        REG_SET_BIT(SPI_MEM_USER_REG(1), SPI_USR_ADDR);
+        REG_SET_FIELD(SPI_MEM_USER1_REG(1), SPI_USR_ADDR_BITLEN, (32-1)); // 32-bit address
+
+        REG_SET_BIT(SPI_MEM_USER_REG(1), SPI_USR_DUMMY);
+        REG_SET_FIELD(SPI_MEM_USER1_REG(1), SPI_MEM_USR_DUMMY_CYCLELEN, (8-1)); // 8-bit dummy cycle
+
+        REG_SET_BIT(SPI_MEM_USER_REG(1), SPI_USR_MOSI);
+        REG_SET_FIELD(SPI_MEM_MOSI_DLEN_REG(1), SPI_MEM_USR_MOSI_DBITLEN, (8*next_block-1)); // Length in bits - 1
+
+        REG_CLR_BIT(SPI_MEM_USER_REG(1), SPI_USR_MISO);
+
+        REG_SET_BIT(SPI_MEM_CTRL_REG(1), SPI_MEM_FASTRD_MODE);
+
+        WRITE_REG(SPI_MEM_ADDR_REG(1), 0xdeadbeef); // Dummy address, will use address from XTS-AES afterwards
+
+        WRITE_REG(SPI_MEM_CMD_REG(1), SPI_MEM_USR);  // Start the SPI transaction
+
+        while(REG_GET_FIELD(SPI_MEM_CMD_REG(1), SPI_MEM_USR) != 0) { }  // Wait for it to finish
+
+        WRITE_REG(GPIO_OUT_W1TC_REG, 1<<2);
+
+        ets_printf("\nSPI MEM USR REG: 0x%08x\n", READ_REG(SPI_MEM_USER_REG(1)));
+
+        // Note: we don't wait for idle status here, because this way
+        // the AES peripheral can start encrypting the next
+        // block while the SPI flash chip is busy completing the
+        // write
+
+        WRITE_REG(AES_XTS_DESTROY_REG, 1);
+
+        len -= next_block;
+        data_bytes += next_block;
+        flash_addr += next_block;
+    }
+
+    result = esp_rom_spiflash_wait_idle();
+
+ done:
+
+    esp_rom_spiflash_write_encrypted_disable();
+
+    return result;
+
+}
+
+
+
 #if !ESP8266
 /* Write encrypted data to flash (either direct for non-compressed upload, or
    freshly decompressed.) Erases as it goes.
@@ -398,7 +657,7 @@ void handle_flash_encrypt_data(void *data_buf, uint32_t length) {
 #if ESP32
   res = esp_rom_spiflash_write_encrypted(fs.next_write, data_buf, length);
 #else
-  res = SPI_Encrypt_Write(fs.next_write, data_buf, length);
+  res = SPI_Encrypt_Write2(fs.next_write, data_buf, length);
 #endif
 
   if (res) {
